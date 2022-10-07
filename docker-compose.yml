@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+
+  db:
+    image: postgres:14.5-alpine3.16
+    ports:
+    - "5433:5432"
+    environment:
+      POSTGRES_DB: "${DB_NAME}"
+      POSTGRES_USER: "${DB_USER}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+
+    env_file:
+      - .env
+
+  redis:
+    image: redis
+    ports:
+      - "6379:6379"
