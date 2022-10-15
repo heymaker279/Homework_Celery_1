@@ -9,20 +9,40 @@ from sqlalchemy.orm import sessionmaker
 from flask.views import MethodView
 from dotenv import dotenv_values
 
-
 app_name = 'app'
 env = dotenv_values(".env")
 app = Flask(app_name)
 app.config['JSON_AS_ASCII'] = False
+app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/1'
+app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/2'
+app.debug = True
 engine = create_engine(
     f'postgresql://{env["DB_USER"]}:{env["DB_PASSWORD"]}@{env["DB_HOST"]}:{env["DB_PORT"]}/{env["DB_NAME"]}')
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
-celery = Celery(app_name, backend='redis://localhost:6379/3', broker='redis://localhost:6379/4')
-celery.conf.update(app.config)
 
 
-@celery.task()
+# celery_app = Celery(app.name, backend=app.config['CELERY_RESULT_BACKEND'], broker=app.config['CELERY_BROKER_URL'])
+
+
+def make_celery(app):
+    app = app
+    celery = Celery(app_name, backend=app.config['CELERY_RESULT_BACKEND'], broker=app.config['CELERY_BROKER_URL'])
+    celery.conf.update(app.config)
+    TaskBase = celery.Task
+    class ContextTask(TaskBase):
+        abstract = True
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return TaskBase.__call__(self, *args, **kwargs)
+    celery.Task = ContextTask
+    return celery
+
+
+celery_app = make_celery(app)
+
+
+@celery_app.task()
 def send_email(email_list):
     sender = env['EMAIL_NAME']
     password = env['EMAIL_PASSWORD']
@@ -41,15 +61,6 @@ def send_email(email_list):
         return 'The message was sent successfully!'
     except Exception as ex:
         return jsonify({'message': f"{ex} check your login or password please!"})
-
-
-class ContextTask(celery.Task):
-    def __call__(self, *args, **kwargs):
-        with app.app_context():
-            return self.run(*args, **kwargs)
-
-
-celery.task = ContextTask
 
 
 class HttpError(Exception):
@@ -107,10 +118,11 @@ def get_item(session, item_id, cls):
 class MailSend(MethodView):
 
     def get(self, task_id):
+        global task
         status = "PENDING"
         while status == "PENDING":
             time.sleep(1)
-            task = AsyncResult(task_id, app=celery)
+            task = AsyncResult(task_id, app=celery_app)
             print(task.status)
             status = task.status
         return jsonify({
@@ -122,9 +134,9 @@ class MailSend(MethodView):
         # send_email('heymaker@yandex.ru')
         task = send_email.delay(get_email_list())
         return jsonify(
-             {'task_id': task.id,
-              'message': 'success'}
-         )
+            {'task_id': task.id,
+             'message': 'success'}
+        )
 
 
 class AdvView(MethodView):
@@ -207,4 +219,6 @@ app.add_url_rule('/user/<int:user_id>', view_func=UserView.as_view('user_get'), 
 app.add_url_rule('/user', view_func=UserView.as_view('user_post'), methods=['POST'])
 app.add_url_rule('/email_send', view_func=MailSend.as_view('mail_send'), methods=['POST'])
 app.add_url_rule(f"/email/<task_id>", view_func=MailSend.as_view('email'), methods=['GET'])
-app.run()
+
+if __name__ == '__main__':
+    app.run()
